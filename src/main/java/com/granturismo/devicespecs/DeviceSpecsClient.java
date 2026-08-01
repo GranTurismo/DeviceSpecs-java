@@ -5,15 +5,15 @@ import com.google.gson.reflect.TypeToken;
 import com.granturismo.devicespecs.filter.DeviceFilterBuilder;
 import com.granturismo.devicespecs.models.DeviceSpecsResponse;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.lang.reflect.Type;
-import java.net.URI;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -24,7 +24,8 @@ public class DeviceSpecsClient {
 
     private final String apiKey;
     private final String baseUrl;
-    private final HttpClient httpClient;
+    private final int connectTimeoutMs;
+    private final int readTimeoutMs;
     private final Gson gson;
 
     public DeviceSpecsClient(String apiKey) {
@@ -32,18 +33,17 @@ public class DeviceSpecsClient {
     }
 
     public DeviceSpecsClient(String apiKey, String baseUrl) {
-        this(apiKey, baseUrl, HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build());
+        this(apiKey, baseUrl, 10000, 15000);
     }
 
-    public DeviceSpecsClient(String apiKey, String baseUrl, HttpClient httpClient) {
+    public DeviceSpecsClient(String apiKey, String baseUrl, int connectTimeoutMs, int readTimeoutMs) {
         if (apiKey == null || apiKey.trim().isEmpty()) {
             throw new IllegalArgumentException("API Key must not be null or empty.");
         }
         this.apiKey = apiKey;
         this.baseUrl = (baseUrl != null && baseUrl.endsWith("/")) ? baseUrl.substring(0, baseUrl.length() - 1) : (baseUrl != null ? baseUrl : DEFAULT_BASE_URL);
-        this.httpClient = httpClient;
+        this.connectTimeoutMs = connectTimeoutMs;
+        this.readTimeoutMs = readTimeoutMs;
         this.gson = new Gson();
     }
 
@@ -69,7 +69,7 @@ public class DeviceSpecsClient {
     }
 
     public CompletableFuture<List<DeviceSpecsResponse>> getDevicesAsync(DeviceFilterBuilder filter) {
-        return executeGetListAsync("/api/values/clean/devices" + (filter != null ? filter.toQueryString() : ""));
+        return CompletableFuture.supplyAsync(() -> getDevices(filter));
     }
 
     // Devices by Manufacturer
@@ -83,8 +83,7 @@ public class DeviceSpecsClient {
     }
 
     public CompletableFuture<List<DeviceSpecsResponse>> getDevicesByManufacturerAsync(String manufacturer, DeviceFilterBuilder filter) {
-        String path = "/api/values/clean/getdevices/" + encodePathSegment(manufacturer) + (filter != null ? filter.toQueryString() : "");
-        return executeGetListAsync(path);
+        return CompletableFuture.supplyAsync(() -> getDevicesByManufacturer(manufacturer, filter));
     }
 
     // Devices by Chipset
@@ -98,8 +97,7 @@ public class DeviceSpecsClient {
     }
 
     public CompletableFuture<List<DeviceSpecsResponse>> getDevicesByChipsetAsync(String chipset, DeviceFilterBuilder filter) {
-        String path = "/api/values/clean/devicesbychipset/" + encodePathSegment(chipset) + (filter != null ? filter.toQueryString() : "");
-        return executeGetListAsync(path);
+        return CompletableFuture.supplyAsync(() -> getDevicesByChipset(chipset, filter));
     }
 
     // Specific Specs by Manufacturer and Model
@@ -109,73 +107,68 @@ public class DeviceSpecsClient {
     }
 
     public CompletableFuture<DeviceSpecsResponse> getDeviceSpecsAsync(String manufacturer, String model) {
-        String path = "/api/values/clean/getspecs/" + encodePathSegment(manufacturer) + "/" + encodePathSegment(model);
-        return executeGetSingleAsync(path);
+        return CompletableFuture.supplyAsync(() -> getDeviceSpecs(manufacturer, model));
     }
 
-    // Helper HTTP execution methods
+    // Helper HTTP execution methods using Android-compatible HttpURLConnection
     private List<DeviceSpecsResponse> executeGetList(String pathAndQuery) {
-        HttpRequest request = buildRequest(pathAndQuery);
-        try {
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            validateResponse(response);
-            Type listType = new TypeToken<List<DeviceSpecsResponse>>() {}.getType();
-            List<DeviceSpecsResponse> result = gson.fromJson(response.body(), listType);
-            return result != null ? result : Collections.emptyList();
-        } catch (IOException | InterruptedException e) {
-            throw new RuntimeException("Error executing request to DeviceSpecs API: " + e.getMessage(), e);
-        }
-    }
-
-    private CompletableFuture<List<DeviceSpecsResponse>> executeGetListAsync(String pathAndQuery) {
-        HttpRequest request = buildRequest(pathAndQuery);
-        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                .thenApply(response -> {
-                    validateResponse(response);
-                    Type listType = new TypeToken<List<DeviceSpecsResponse>>() {}.getType();
-                    List<DeviceSpecsResponse> result = gson.fromJson(response.body(), listType);
-                    return result != null ? result : Collections.emptyList();
-                });
+        String jsonBody = httpGet(pathAndQuery);
+        Type listType = new TypeToken<List<DeviceSpecsResponse>>() {}.getType();
+        List<DeviceSpecsResponse> result = gson.fromJson(jsonBody, listType);
+        return result != null ? result : Collections.emptyList();
     }
 
     private DeviceSpecsResponse executeGetSingle(String pathAndQuery) {
-        HttpRequest request = buildRequest(pathAndQuery);
+        String jsonBody = httpGet(pathAndQuery);
+        return gson.fromJson(jsonBody, DeviceSpecsResponse.class);
+    }
+
+    private String httpGet(String pathAndQuery) {
+        HttpURLConnection connection = null;
         try {
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            validateResponse(response);
-            return gson.fromJson(response.body(), DeviceSpecsResponse.class);
-        } catch (IOException | InterruptedException e) {
+            URL url = new URL(baseUrl + pathAndQuery);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(connectTimeoutMs);
+            connection.setReadTimeout(readTimeoutMs);
+            connection.setRequestProperty(HEADER_API_KEY, apiKey);
+            connection.setRequestProperty("Accept", "application/json");
+
+            int status = connection.getResponseCode();
+            InputStream inputStream = (status >= 200 && status < 300) ? connection.getInputStream() : connection.getErrorStream();
+
+            String responseBody = readStream(inputStream);
+            if (status < 200 || status >= 300) {
+                throw new RuntimeException("DeviceSpecs API request failed with status code " + status + ": " + responseBody);
+            }
+            return responseBody;
+        } catch (IOException e) {
             throw new RuntimeException("Error executing request to DeviceSpecs API: " + e.getMessage(), e);
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
-    private CompletableFuture<DeviceSpecsResponse> executeGetSingleAsync(String pathAndQuery) {
-        HttpRequest request = buildRequest(pathAndQuery);
-        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                .thenApply(response -> {
-                    validateResponse(response);
-                    return gson.fromJson(response.body(), DeviceSpecsResponse.class);
-                });
-    }
-
-    private HttpRequest buildRequest(String pathAndQuery) {
-        return HttpRequest.newBuilder()
-                .uri(URI.create(baseUrl + pathAndQuery))
-                .header(HEADER_API_KEY, apiKey)
-                .header("Accept", "application/json")
-                .GET()
-                .build();
-    }
-
-    private void validateResponse(HttpResponse<String> response) {
-        int status = response.statusCode();
-        if (status < 200 || status >= 300) {
-            throw new RuntimeException("DeviceSpecs API request failed with status code " + status + ": " + response.body());
+    private String readStream(InputStream inputStream) throws IOException {
+        if (inputStream == null) return "";
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append("\n");
+            }
         }
+        return sb.toString().trim();
     }
 
     private String encodePathSegment(String value) {
         if (value == null) return "";
-        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
+        try {
+            return URLEncoder.encode(value, "UTF-8").replace("+", "%20");
+        } catch (Exception e) {
+            return value;
+        }
     }
 }
