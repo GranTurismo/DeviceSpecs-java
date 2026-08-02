@@ -33,7 +33,6 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
     }
 }
 
-
 tasks.test {
     useJUnitPlatform()
 }
@@ -49,7 +48,7 @@ publishing {
             pom {
                 name.set("DeviceSpecs SDK")
                 description.set("Official Java, Kotlin, and Android SDK for Device Specs API with Fluent Deep Filtering.")
-                url.set("https://github.com/granturismo/DeviceSpecs")
+                url.set("https://github.com/GranTurismo/DeviceSpecs-java")
 
                 licenses {
                     license {
@@ -62,28 +61,15 @@ publishing {
                     developer {
                         id.set("granturismo")
                         name.set("GranTurismo")
-                        email.set("support@granturismo.com")
+                        email.set("kupatadze2000@outlook.com")
                     }
                 }
 
                 scm {
-                    connection.set("scm:git:git://github.com/granturismo/DeviceSpecs.git")
-                    developerConnection.set("scm:git:ssh://github.com/granturismo/DeviceSpecs.git")
-                    url.set("https://github.com/granturismo/DeviceSpecs")
+                    connection.set("scm:git:git://github.com/GranTurismo/DeviceSpecs-java.git")
+                    developerConnection.set("scm:git:ssh://github.com/GranTurismo/DeviceSpecs-java.git")
+                    url.set("https://github.com/GranTurismo/DeviceSpecs-java")
                 }
-            }
-        }
-    }
-
-    repositories {
-        maven {
-            name = "sonatype"
-            val releasesRepoUrl = uri("https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/")
-            val snapshotsRepoUrl = uri("https://s01.oss.sonatype.org/content/repositories/snapshots/")
-            url = if (version.toString().endsWith("SNAPSHOT")) snapshotsRepoUrl else releasesRepoUrl
-            credentials {
-                username = project.findProperty("ossrhUsername")?.toString() ?: ""
-                password = project.findProperty("ossrhPassword")?.toString() ?: ""
             }
         }
     }
@@ -96,4 +82,11 @@ signing {
         useInMemoryPgpKeys(signingKey, signingPassword)
         sign(publishing.publications["mavenJava"])
     }
+}
+
+val zipBundle = tasks.register<Zip>("zipBundle") {
+    dependsOn("publishToMavenLocal")
+    from(file("${System.getProperty("user.home")}/.m2/repository/com/granturismo/devicespecs-sdk/1.0.0"))
+    archiveFileName.set("devicespecs-sdk-1.0.0-bundle.zip")
+    destinationDirectory.set(file("${project.buildDir}/distributions"))
 }
